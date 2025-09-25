@@ -152,7 +152,7 @@ fn main() {
     cfg.define("LV_CONF_INCLUDE_SIMPLE", Some("1"))
         .include(&lvgl_src)
         .include(&vendor)
-        .warnings(true)
+        .warnings(false)
         .include(&lv_config_dir);
     if let Some(p) = &font_extra_src {
         cfg.include(p);
@@ -231,7 +231,8 @@ fn main() {
 
     let out_path = PathBuf::from(env::var("OUT_DIR").unwrap());
     let bindings =
-        bindgen::Builder::default().header(shims_dir.join("lvgl_sys.h").to_str().unwrap());
+        bindgen::Builder::default()
+            .header(shims_dir.join("lvgl_sys.h").to_str().unwrap());
     let bindings = add_font_headers(bindings, &font_extra_src);
     #[cfg(feature = "drivers")]
     let bindings = bindings
@@ -253,6 +254,7 @@ fn main() {
                 .map(|s| s.collect::<Vec<_>>())
                 .unwrap_or(Vec::new()),
         )
+        .wrap_static_fns(true)
         .generate()
         .expect("Unable to generate bindings");
 
