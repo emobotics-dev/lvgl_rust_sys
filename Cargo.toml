@@ -14,5 +14,5 @@ use-string-functions = []
 
 
 [build-dependencies]
-bindgen = "0.70.1"
+bindgen = { version = "0.72.1", features = ["experimental"] }
 cc = "1.1.18"
