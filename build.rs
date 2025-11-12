@@ -255,6 +255,7 @@ fn main() {
                 .unwrap_or(Vec::new()),
         )
         .wrap_static_fns(true)
+        .wrap_static_fns_path("./static_fns.c")
         .generate()
         .expect("Unable to generate bindings");
 
