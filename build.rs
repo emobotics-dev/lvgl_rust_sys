@@ -287,9 +287,14 @@ fn main() {
         .generate()
         .expect("Unable to generate bindings");
 
+    let bindings_path = out_path.join("bindings.rs");
     bindings
-        .write_to_file(out_path.join("bindings.rs"))
+        .write_to_file(&bindings_path)
         .expect("Can't write bindings!");
+
+    // bindgen 0.72 emits `transmute` for signed↔unsigned bitfield casts;
+    // newer rustc warns (unnecessary_transmutes). Patch to use direct casts.
+    fix_bindgen_transmutes(&bindings_path);
 
     cfg.file(out_path.join("static_fns.c"));
     cfg.compile("lvgl");
@@ -332,6 +337,102 @@ fn add_c_files(build: &mut cc::Build, path: impl AsRef<Path>) {
             build.file(&path);
         }
     }
+}
+
+/// Replace unnecessary `transmute` calls in bindgen bitfield accessors and
+/// strip `unsafe` blocks that become safe after removal.
+/// bindgen 0.72 uses transmute for integer casts that rustc now warns about.
+fn fix_bindgen_transmutes(path: &Path) {
+    let mut code = std::fs::read_to_string(path).unwrap();
+
+    // Phase 1: Replace `::core::mem::transmute(INNER)` → `(INNER) as _`.
+    // Uses paren-matching to handle multi-line expressions.
+    let needle = "::core::mem::transmute(";
+    while let Some(start) = code.find(needle) {
+        let inner_start = start + needle.len();
+        let mut depth: u32 = 1;
+        let mut end = inner_start;
+        for ch in code[inner_start..].chars() {
+            match ch {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+            end += ch.len_utf8();
+        }
+        let inner = code[inner_start..end].to_string();
+        let replacement = format!("({}) as _", inner);
+        code = format!("{}{}{}", &code[..start], replacement, &code[end + 1..]);
+    }
+
+    // Phase 2: Strip `unsafe { ... }` blocks that no longer contain unsafe ops.
+    // Keep blocks containing `raw_get`, `raw_set`, or `addr_of` (raw-pointer ops).
+    let unsafe_kw = "unsafe {";
+    let mut result = String::with_capacity(code.len());
+    let mut pos = 0;
+    let bytes = code.as_bytes();
+    while pos < code.len() {
+        if let Some(rel) = code[pos..].find(unsafe_kw) {
+            let block_start = pos + rel;
+            let brace_start = block_start + unsafe_kw.len() - 1; // position of '{'
+            // Find matching '}'
+            let mut depth: u32 = 1;
+            let mut end = brace_start + 1;
+            while end < code.len() && depth > 0 {
+                match bytes[end] {
+                    b'{' => depth += 1,
+                    b'}' => depth -= 1,
+                    _ => {}
+                }
+                end += 1;
+            }
+            let body = &code[brace_start + 1..end - 1]; // between { and }
+            // Only strip unsafe from blocks whose body is purely safe after
+            // transmute removal: bitfield get/set and simple casts.
+            let is_safe_body = !body.contains("unsafe")
+                && !body.contains("raw_get")
+                && !body.contains("raw_set")
+                && !body.contains("addr_of")
+                && !body.contains("write_bytes")
+                && !body.contains("assume_init")
+                && !body.contains("from_raw")
+                && !body.contains("as_ptr")
+                && !body.contains("read_unaligned")
+                && !body.contains("write_unaligned")
+                && !body.contains("copy_nonoverlapping")
+                && (body.contains("_bitfield_1") || body.contains("as _"));
+            let needs_unsafe = !is_safe_body;
+
+            // Copy text before `unsafe`
+            result.push_str(&code[pos..block_start]);
+
+            if needs_unsafe {
+                // Keep the entire `unsafe { ... }` block
+                result.push_str(&code[block_start..end]);
+            } else {
+                // Strip `unsafe { }`, keep the body with adjusted whitespace.
+                // Single-line: `unsafe { EXPR }` → `EXPR`
+                // Multi-line: preserve inner indentation as-is.
+                let trimmed = body.trim();
+                if !body.contains('\n') {
+                    result.push_str(trimmed);
+                } else {
+                    result.push_str(body);
+                }
+            }
+            pos = end;
+        } else {
+            result.push_str(&code[pos..]);
+            break;
+        }
+    }
+
+    std::fs::write(path, result).unwrap();
 }
 
 fn canonicalize(path: impl AsRef<Path>) -> PathBuf {
