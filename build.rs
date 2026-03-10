@@ -140,6 +140,10 @@ fn main() {
     }
 
     let mut cfg = Build::new();
+    let target_str = env::var("TARGET").unwrap_or_default();
+    if target_str.starts_with("xtensa-") {
+        cfg.flag("-mlongcalls");
+    }
     if let Some(p) = &font_extra_src {
         add_c_files(&mut cfg, p)
     }
@@ -148,6 +152,16 @@ fn main() {
     add_c_files(&mut cfg, &shims_dir);
     #[cfg(feature = "drivers")]
     add_c_files(&mut cfg, &drivers);
+
+    // For host (non-xtensa) builds, add SDL2 include path so LVGL's SDL driver compiles
+    if !target_str.starts_with("xtensa-") {
+        if let Ok(lib) = pkg_config::probe_library("sdl2") {
+            for p in &lib.include_paths {
+                cfg.include(p);
+            }
+        }
+        println!("cargo:rustc-link-lib=SDL2");
+    }
 
     cfg.define("LV_CONF_INCLUDE_SIMPLE", Some("1"))
         .include(&lvgl_src)
@@ -171,8 +185,6 @@ fn main() {
         });
     }
 
-    cfg.compile("lvgl");
-
     let mut cc_args = vec![
         "-DLV_CONF_INCLUDE_SIMPLE=1",
         "-I",
@@ -191,6 +203,15 @@ fn main() {
     }
 
     let mut additional_args = Vec::new();
+    // Add SDL2 include paths for bindgen on host builds
+    if !target.starts_with("xtensa-") {
+        if let Ok(lib) = pkg_config::probe_library("sdl2") {
+            for p in &lib.include_paths {
+                additional_args.push("-I".to_string());
+                additional_args.push(p.to_str().unwrap().to_string());
+            }
+        }
+    }
     if target.ends_with("emscripten") {
         match env::var("EMSDK") {
             Ok(em_path) =>
@@ -241,6 +262,12 @@ fn main() {
     #[cfg(feature = "rust_timer")]
     let bindings = bindings.header(shims_dir.join("rs_timer.h").to_str().unwrap());
 
+    let extra_clang_args: Vec<String> = env::var("BINDGEN_EXTRA_CLANG_ARGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+
     let bindings = bindings
         .generate_comments(false)
         .derive_default(true)
@@ -254,14 +281,18 @@ fn main() {
                 .map(|s| s.collect::<Vec<_>>())
                 .unwrap_or(Vec::new()),
         )
+        .clang_args(&extra_clang_args)
         .wrap_static_fns(true)
-        .wrap_static_fns_path("./static_fns.c")
+        .wrap_static_fns_path(out_path.join("static_fns.c"))
         .generate()
         .expect("Unable to generate bindings");
 
     bindings
         .write_to_file(out_path.join("bindings.rs"))
         .expect("Can't write bindings!");
+
+    cfg.file(out_path.join("static_fns.c"));
+    cfg.compile("lvgl");
 
     #[cfg(feature = "drivers")]
     link_extra.split(',').for_each(|a| {
