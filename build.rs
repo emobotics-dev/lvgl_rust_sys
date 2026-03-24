@@ -318,6 +318,11 @@ fn main() {
     // newer rustc warns (unnecessary_transmutes). Patch to use direct casts.
     fix_bindgen_transmutes(&bindings_path);
 
+    // LVGL 9.5 btnmatrix bug: text_length is not preserved through the draw
+    // task pipeline on 32-bit targets, causing button text truncation.
+    // Patch the source before compilation to set text_length explicitly.
+    patch_btnmatrix_text_length(&lvgl_src);
+
     cfg.file(out_path.join("static_fns.c"));
     cfg.compile("lvgl");
 
@@ -346,6 +351,23 @@ fn add_font_headers(
         temp
     } else {
         bindings
+    }
+}
+
+/// Patch lv_buttonmatrix.c to set text_length before lv_draw_label.
+/// LVGL 9.5 does not preserve text_length through the draw task pipeline
+/// on 32-bit targets, truncating button text to 1 character.
+fn patch_btnmatrix_text_length(lvgl_src: &Path) {
+    let file = lvgl_src.join("widgets/buttonmatrix/lv_buttonmatrix.c");
+    if !file.exists() { return; }
+    let code = std::fs::read_to_string(&file).unwrap();
+    let needle = "draw_label_dsc_act.text_local = true;\n        draw_label_dsc_act.base.id1";
+    if code.contains(needle) && !code.contains("draw_label_dsc_act.text_length") {
+        let patched = code.replace(
+            needle,
+            "draw_label_dsc_act.text_local = true;\n        draw_label_dsc_act.text_length = (uint32_t)lv_strlen(txt);\n        draw_label_dsc_act.base.id1",
+        );
+        std::fs::write(&file, patched).unwrap();
     }
 }
 
